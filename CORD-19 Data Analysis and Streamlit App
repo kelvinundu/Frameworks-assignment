@@ -1,0 +1,282 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from collections import Counter
+import re # Used for simple word tokenization
+import io
+from PIL import Image
+
+# Set a clean Matplotlib/Seaborn style
+sns.set_theme(style="whitegrid")
+plt.style.use('ggplot')
+
+# --- Synthetic Data Generation ---
+# IMPORTANT: Since I cannot download the large CORD-19 file from the internet, 
+# this function creates a synthetic DataFrame that closely mirrors the required structure 
+# (columns, data types, and missing values) for the analysis to work.
+@st.cache_data
+def load_and_prepare_synthetic_data(n_rows=5000):
+    """Generates a synthetic DataFrame mimicking CORD-19 metadata.csv."""
+    
+    print("Generating synthetic data...")
+    
+    # Define plausible values for categorical columns
+    sources = ['PMC', 'WHO', 'medRxiv']
+    journals = ['Nature Medicine', 'The Lancet', 'NEJM', 'JAMA', 'Virology']
+    titles = [
+        "A Novel Coronavirus Originating in Wuhan",
+        "Clinical Characteristics of COVID-19",
+        "Efficacy of Vaccine X against Variant Y",
+        "Public Health Response to the Pandemic",
+        "Impact of Lockdowns on Mental Health"
+    ]
+    
+    # Generate random data
+    data = {
+        'cord_uid': [f"uid_{i}" for i in range(n_rows)],
+        'sha': [f"sha_{i}" if np.random.rand() > 0.1 else np.nan for i in range(n_rows)],
+        'source_x': np.random.choice(sources, n_rows, p=[0.5, 0.3, 0.2]),
+        'title': np.random.choice(titles, n_rows) + " on " + np.random.choice(["Children", "Adults", "Healthcare Workers"], n_rows),
+        'abstract': [
+            "This study investigates the prevalence and impact of COVID-19 in high-risk populations. Results show a significant correlation between age and severe outcomes." * (np.random.randint(1, 5)) if np.random.rand() > 0.15 else np.nan 
+            for _ in range(n_rows)
+        ],
+        'publish_time': pd.to_datetime(pd.Series(pd.date_range(start='2019-12-01', end='2022-12-31', periods=n_rows).strftime('%Y-%m-%d'))),
+        'journal': np.random.choice(journals + [np.nan] * 3, n_rows, p=[0.15, 0.2, 0.1, 0.1, 0.1, 0.1, 0.1, 0.15]),
+        'authors': [
+            ', '.join([f"Author{i}" for i in np.random.randint(1, 5)]) if np.random.rand() > 0.1 else np.nan
+            for _ in range(n_rows)
+        ],
+        'full_text_file': [f"biorxiv_medrxiv/pdf/{i}" for i in range(n_rows)]
+    }
+    
+    df = pd.DataFrame(data)
+    
+    # Introduce some noise and older dates to mimic pre-COVID literature
+    df['publish_time'] = df['publish_time'].apply(lambda x: x - pd.DateOffset(years=np.random.randint(0, 2)) if np.random.rand() > 0.8 else x)
+    
+    # Sort by publish time
+    df.sort_values(by='publish_time', inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    
+    return df
+
+# --- Part 1: Data Loading and Basic Exploration ---
+
+def explore_data(df):
+    """Performs and prints basic data exploration metrics."""
+    st.header("1. Data Exploration")
+    st.write(f"**DataFrame Dimensions:** {df.shape[0]} rows, {df.shape[1]} columns")
+    
+    st.subheader("First 5 Rows (`df.head()`):")
+    st.dataframe(df.head())
+    
+    st.subheader("Column Data Types and Non-Null Counts (`df.info()`):")
+    buffer = io.StringIO()
+    df.info(buf=buffer)
+    st.text(buffer.getvalue())
+
+    st.subheader("Missing Values Count (`df.isnull().sum()`):")
+    missing_data = df.isnull().sum().sort_values(ascending=False)
+    st.dataframe(missing_data[missing_data > 0])
+    
+    st.subheader("Basic Statistics for Numerical Columns (`df.describe()`):")
+    # Only numerical data is publish_time (timestamp) which doesn't describe well, 
+    # but we force describe on all objects to show counts of unique values
+    st.dataframe(df.describe(include='all').T)
+
+# --- Part 2: Data Cleaning and Preparation ---
+
+def clean_data(df):
+    """
+    Cleans and prepares the DataFrame for analysis.
+    Returns the cleaned DataFrame.
+    """
+    st.header("2. Data Cleaning and Preparation")
+    
+    # --- Convert Date Columns ---
+    
+    # 1. Convert 'publish_time' to datetime objects. 
+    # This is often the most critical cleaning step for dates.
+    df['publish_time'] = pd.to_datetime(df['publish_time'], errors='coerce')
+    st.success("Converted 'publish_time' to datetime objects.")
+    
+    # 2. Extract publication year
+    df['pub_year'] = df['publish_time'].dt.year
+    st.info("Extracted 'pub_year' for time-based analysis.")
+
+    # --- Handle Missing Data ---
+    
+    # 1. Handling columns with many missing values: 
+    # We will drop rows where the 'title' is missing, as a title is essential for analysis.
+    df.dropna(subset=['title'], inplace=True)
+    st.info(f"Dropped {df['title'].isnull().sum()} rows with missing titles (Should be 0 now).")
+    
+    # 2. Handling 'abstract': Fill missing abstracts with an empty string ('') 
+    # to allow word count calculation without errors.
+    df['abstract'].fillna('', inplace=True)
+    st.success("Filled missing 'abstract' values with empty strings.")
+    
+    # 3. Handling 'journal': Fill missing journal names with 'Unknown Journal' 
+    # to maintain these records for other analysis, treating 'missing' as a category.
+    df['journal'].fillna('Unknown Journal', inplace=True)
+    st.success("Filled missing 'journal' values with 'Unknown Journal'.")
+    
+    # --- Create New Columns ---
+    
+    # Create abstract word count column
+    df['abstract_word_count'] = df['abstract'].apply(lambda x: len(x.split()))
+    st.info("Created 'abstract_word_count' column.")
+    
+    # Final check of the cleaned data
+    st.subheader("Missing Values After Cleaning:")
+    st.dataframe(df.isnull().sum().sort_values(ascending=False).head(5))
+    
+    return df
+
+# --- Part 3: Data Analysis and Visualization ---
+
+def analyze_and_visualize(df_cleaned, year_min, year_max):
+    """Performs analysis and generates visualizations for the Streamlit app."""
+    
+    st.header("3. Data Analysis and Visualization")
+    
+    # Filter data based on Streamlit slider input
+    df_filtered = df_cleaned[
+        (df_cleaned['pub_year'] >= year_min) & 
+        (df_cleaned['pub_year'] <= year_max)
+    ]
+    
+    if df_filtered.empty:
+        st.warning(f"No data available for the selected year range: {year_min}-{year_max}")
+        return
+
+    st.write(f"**Analyzing {len(df_filtered)} papers** published between {year_min} and {year_max}.")
+    
+    # --- Analysis 1: Publications Over Time ---
+    
+    # Count papers by publication year (for line chart)
+    papers_by_year = df_filtered.groupby('pub_year').size().reset_index(name='count')
+    
+    # --- Analysis 2: Top Journals ---
+    
+    # Identify top 10 journals
+    top_journals = df_filtered['journal'].value_counts().nlargest(10).reset_index()
+    top_journals.columns = ['journal', 'count']
+    
+    # --- Analysis 3: Word Frequency in Titles ---
+    
+    # Simple tokenization and counting for title word cloud (text output)
+    all_titles = ' '.join(df_filtered['title'].astype(str).str.lower())
+    words = re.findall(r'\b\w+\b', all_titles)
+    
+    # Exclude common stop words and short words
+    stop_words = {'a', 'the', 'of', 'in', 'and', 'for', 'on', 'with', 'to', 'is', 'from', 'an', 'are', 'by'}
+    filtered_words = [word for word in words if word not in stop_words and len(word) > 2]
+    
+    word_counts = Counter(filtered_words)
+    top_words = word_counts.most_common(20)
+
+    # --- Analysis 4: Paper Counts by Source ---
+    
+    source_counts = df_filtered['source_x'].value_counts().reset_index()
+    source_counts.columns = ['source', 'count']
+
+    # --- Visualization ---
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 14))
+    
+    # 1. Line Chart: Publications Over Time
+    axes[0, 0].plot(papers_by_year['pub_year'], papers_by_year['count'], marker='o', color='skyblue')
+    axes[0, 0].set_title('1. Number of Publications Over Time', fontsize=14)
+    axes[0, 0].set_xlabel('Publication Year')
+    axes[0, 0].set_ylabel('Paper Count')
+    axes[0, 0].tick_params(axis='x', rotation=45)
+    axes[0, 0].grid(axis='y', linestyle='--')
+    
+    # 2. Bar Chart: Top Publishing Journals
+    sns.barplot(ax=axes[0, 1], x='count', y='journal', data=top_journals, palette='viridis')
+    axes[0, 1].set_title(f'2. Top 10 Publishing Journals ({year_min}-{year_max})', fontsize=14)
+    axes[0, 1].set_xlabel('Paper Count')
+    axes[0, 1].set_ylabel('Journal Name')
+
+    # 3. Bar Chart: Paper Counts by Source
+    sns.barplot(ax=axes[1, 0], x='source', y='count', data=source_counts, palette='magma')
+    axes[1, 0].set_title('3. Paper Counts by Source', fontsize=14)
+    axes[1, 0].set_xlabel('Source')
+    axes[1, 0].set_ylabel('Paper Count')
+    
+    # 4. Histogram: Distribution of Abstract Word Count
+    sns.histplot(ax=axes[1, 1], data=df_filtered, x='abstract_word_count', bins=30, kde=True, color='purple')
+    axes[1, 1].set_title('4. Distribution of Abstract Word Count', fontsize=14)
+    axes[1, 1].set_xlabel('Abstract Word Count')
+    axes[1, 1].set_ylabel('Frequency')
+    
+    plt.tight_layout(rect=[0, 0.03, 1, 0.98])
+    
+    # Display the plots in Streamlit
+    st.pyplot(fig)
+    
+    # --- Display Top Words (Simulated Word Cloud Output) ---
+    st.subheader("Most Frequent Words in Paper Titles")
+    word_df = pd.DataFrame(top_words, columns=['Word', 'Count'])
+    st.markdown(
+        "**Insight:** These words reflect the main topics and focus areas of research in the current view."
+    )
+    st.dataframe(word_df)
+    
+    # --- Final Data Sample ---
+    st.header("Sample Cleaned Data")
+    st.write("First 10 rows of the cleaned and prepared data:")
+    st.dataframe(df_filtered[['title', 'journal', 'pub_year', 'abstract_word_count']].head(10))
+
+
+# --- Part 4: Streamlit Application ---
+
+def main():
+    """The main function to run the Streamlit application."""
+    st.set_page_config(layout="wide", page_title="CORD-19 Data Explorer")
+    
+    # Load data once and cache it
+    try:
+        df_raw = load_and_prepare_synthetic_data()
+        df_cleaned = clean_data(df_raw.copy()) # Use a copy for cleaning operations
+    except Exception as e:
+        st.error(f"Failed to load or clean data. Please check the `load_and_prepare_synthetic_data` function. Error: {e}")
+        return
+
+    st.title("CORD-19 Research Metadata Explorer 🔬")
+    st.markdown(
+        """
+        This tool provides a basic interactive exploration of the CORD-19 research challenge metadata, 
+        simulating data cleaning, analysis, and visualization using **Pandas, Matplotlib, and Streamlit**.
+        """
+    )
+    
+    st.sidebar.header("Filter Settings")
+    
+    # Interactive Widget (Slider)
+    # The range is based on the synthetic data's typical years.
+    min_year = int(df_cleaned['pub_year'].min())
+    max_year = int(df_cleaned['pub_year'].max())
+    
+    year_range = st.sidebar.slider(
+        "Select Publication Year Range", 
+        min_value=min_year, 
+        max_value=max_year, 
+        value=(2020, 2022), # Default to peak COVID years
+        step=1
+    )
+    
+    st.sidebar.markdown("---")
+    st.sidebar.markdown(f"**Data points loaded:** {len(df_raw)}")
+
+    # Run Analysis and Visualization based on the filter
+    analyze_and_visualize(df_cleaned, year_range[0], year_range[1])
+
+if __name__ == "__main__":
+    main()
+
+    
