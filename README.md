@@ -11,7 +11,6 @@ Source Distribution: The bulk of the research originates from PMC (PubMed Centra
 Title Keywords: The most frequent words in the titles (e.g., 'coronavirus', 'vaccine', 'health', 'wuhan') directly correlate with the central themes of the pandemic.
 
 Reflection on Challenges and Learning
-Challenge: External Data Dependency: The primary challenge was the inability to directly load the large external CSV file. This was overcome by designing a load_and_prepare_synthetic_data function. This process requires a deep understanding of the expected data structure and potential data imperfections (like missing values) to create a realistic simulation.
 
 Challenge: Streamlit Integration: Ensuring the entire workflow (data loading, cleaning, filtering, and plotting) executes correctly within the reactive environment of Streamlit was key. Using the @st.cache_data decorator was crucial for performance, ensuring the large synthetic dataset is generated only once, even if the user interacts with the sidebar widgets multiple times.
 
